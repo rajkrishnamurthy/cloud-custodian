@@ -1,23 +1,13 @@
-# Copyright 2017 Capital One Services, LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-import fakeredis
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 import logging
 import os
 
-from c7n_mailer.ldap_lookup import LdapLookup, Redis
-from ldap3 import Server, Connection, MOCK_SYNC
+import fakeredis
+from ldap3 import MOCK_SYNC, Connection, Server
 from ldap3.strategy import mockBase
+
+from c7n_mailer.ldap_lookup import LdapLookup, Redis
 
 logger = logging.getLogger('custodian.mailer')
 
@@ -61,8 +51,11 @@ MAILER_CONFIG_AZURE = {
     'queue_url': 'asq://storageaccount.queue.core.windows.net/queuename',
     'from_address': 'you@youremail.com',
     'sendgrid_api_key': 'SENDGRID_API_KEY',
-    'templates_folders': [os.path.abspath(os.path.dirname(__file__)),
-                          os.path.abspath('/')],
+    'templates_folders': [
+        os.path.abspath(os.path.dirname(__file__)),
+        os.path.abspath('/'),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), 'test-templates')),
+    ],
 }
 
 RESOURCE_1 = {
@@ -502,7 +495,58 @@ ASQ_MESSAGE_DATADOG = '''{
    ]
 }'''
 
-
+ASQ_MESSAGE_MULTIPLE_ADDRS = '''{
+   "account":"subscription",
+   "account_id":"ee98974b-5d2a-4d98-a78a-382f3715d07e",
+   "region":"all",
+   "action":{
+      "to":[
+        "tag:owner",
+        "user@domain.com"
+      ],
+      "template":"default",
+      "priority_header":"2",
+      "type":"notify",
+      "transport":{
+         "queue":"https://test.queue.core.windows.net/testcc",
+         "type":"asq"
+      },
+      "subject":"testing notify action"
+   },
+   "policy":{
+      "resource":"azure.keyvault",
+      "name":"test-notify-for-keyvault",
+      "actions":[
+         {
+            "to":[
+              "tag:owner",
+              "user@domain.com"
+            ],
+            "template":"default",
+            "priority_header":"2",
+            "type":"notify",
+            "transport":{
+               "queue":"https://test.queue.core.windows.net/testcc",
+               "type":"asq"
+            },
+            "subject":"testing notify action"
+         }
+      ]
+   },
+   "event":null,
+   "resources":[
+      {
+         "name":"cckeyvault1",
+         "tags":{
+            "owner":"user2@domain.com"
+         },
+         "resourceGroup":"test_keyvault",
+         "location":"southcentralus",
+         "type":"Microsoft.KeyVault/vaults",
+         "id":"/subscriptions/ee98974b-5d2a-4d98-a78a-382f3715d07e/resourceGroups/test_keyvault/providers/Microsoft.KeyVault/vaults/cckeyvault1"
+      }
+   ]
+}'''
 # Monkey-patch ldap3 to work around a bytes/text handling bug.
 
 _safe_rdn = mockBase.safe_rdn

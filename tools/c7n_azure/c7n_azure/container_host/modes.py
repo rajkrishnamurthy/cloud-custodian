@@ -1,16 +1,5 @@
-# Copyright 2019 Microsoft Corporation
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 
 import logging
 
@@ -35,9 +24,10 @@ class AzureContainerHostMode(ServerlessExecutionMode):
 
     POLICY_METRICS = ('ResourceCount', 'ResourceTime', 'ActionTime')
 
+    log = logging.getLogger('custodian.azure.AzureContainerHostMode')
+
     def __init__(self, policy):
         self.policy = policy
-        self.log = logging.getLogger('custodian.azure.AzureContainerHostMode')
 
     def run(self, event=None, lambda_context=None):
         raise NotImplementedError("subclass responsibility")
@@ -49,8 +39,16 @@ class AzureContainerHostMode(ServerlessExecutionMode):
 @execution.register(CONTAINER_TIME_TRIGGER_MODE)
 class AzureContainerPeriodicMode(AzureContainerHostMode, PullMode):
     """A policy that runs at specified time intervals."""
+    # Pattern based on apscheduler's CronTrigger:
+    # https://github.com/agronholm/apscheduler/tree/master/apscheduler/triggers/cron
+    schedule_regex = (r'^\s?(\*|[0-9]|\,|\/|\-)+ '
+                      r'(\*|[0-9]|\,|\/|\-)+ '
+                      r'(\*|[1-9]|[1-2][0-9]|3[0-1]|\,|\*\/|\-)+ '
+                      r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|'
+                      r'\,|\*\/|[1-9]|1[0-2]|\*)+ '
+                      r'(mon|tue|wed|thu|fri|sat|sun|[0-6]|\,|\*|\-)+\s?$')
     schema = utils.type_schema(CONTAINER_TIME_TRIGGER_MODE,
-                               schedule={'type': 'string'},
+                               schedule={'type': 'string', 'pattern': schedule_regex},
                                rinherit=AzureContainerHostMode.schema)
 
     def provision(self):

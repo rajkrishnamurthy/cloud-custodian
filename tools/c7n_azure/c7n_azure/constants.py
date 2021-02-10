@@ -1,38 +1,28 @@
-# Copyright 2019 Microsoft Corporation
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 
 """
 Azure Functions
 """
 # Docker version from https://hub.docker.com/r/microsoft/azure-functions/
-FUNCTION_DOCKER_VERSION = 'DOCKER|mcr.microsoft.com/azure-functions/python:2.0-python3.6-appservice'
-FUNCTION_EXT_VERSION = '~2'
+FUNCTION_DOCKER_VERSION = 'DOCKER|mcr.microsoft.com/azure-functions/python:3.0-python3.8'
+FUNCTION_EXT_VERSION = '~3'
 FUNCTION_EVENT_TRIGGER_MODE = 'azure-event-grid'
 FUNCTION_TIME_TRIGGER_MODE = 'azure-periodic'
 FUNCTION_KEY_URL = 'hostruntime/admin/host/systemkeys/_master?api-version=2018-02-01'
-FUNCTION_CONSUMPTION_BLOB_CONTAINER = 'cloud-custodian-packages'
-FUNCTION_PACKAGE_SAS_EXPIRY_DAYS = 365 * 10  # 10 years
 FUNCTION_AUTOSCALE_NAME = 'cloud_custodian_default'
+AUTH_TYPE_EMBED = "Embedded"
+AUTH_TYPE_MSI = "SystemAssigned"
+AUTH_TYPE_UAI = "UserAssigned"
 
 """
 Azure Container Host
 """
 CONTAINER_EVENT_TRIGGER_MODE = 'container-event'
 CONTAINER_TIME_TRIGGER_MODE = 'container-periodic'
-ENV_CONTAINER_EVENT_QUEUE_ID = 'AZURE_EVENT_QUEUE_RESOURCE_ID'
-ENV_CONTAINER_EVENT_QUEUE_NAME = 'AZURE_EVENT_QUEUE_NAME'
-ENV_CONTAINER_POLICY_STORAGE = 'AZURE_CONTAINER_STORAGE'
+ENV_CONTAINER_STORAGE_RESOURCE_ID = 'AZURE_CONTAINER_STORAGE_RESOURCE_ID'
+ENV_CONTAINER_QUEUE_NAME = 'AZURE_CONTAINER_QUEUE_NAME'
+ENV_CONTAINER_POLICY_URI = 'AZURE_CONTAINER_POLICY_URI'
 ENV_CONTAINER_OPTION_LOG_GROUP = 'AZURE_CONTAINER_LOG_GROUP'
 ENV_CONTAINER_OPTION_METRICS = 'AZURE_CONTAINER_METRICS'
 ENV_CONTAINER_OPTION_OUTPUT_DIR = 'AZURE_CONTAINER_OUTPUT_DIR'
@@ -43,6 +33,8 @@ Event Grid Mode
 """
 EVENT_GRID_UPN_CLAIM_JMES_PATH = \
     'data.claims."http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn"'
+EVENT_GRID_NAME_CLAIM_JMES_PATH = \
+    'data.claims."http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"'
 EVENT_GRID_SP_NAME_JMES_PATH = 'data.claims.appid'
 EVENT_GRID_SERVICE_ADMIN_JMES_PATH = \
     'data.claims."http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"'
@@ -82,6 +74,7 @@ Authentication Resource
 RESOURCE_ACTIVE_DIRECTORY = 'https://management.core.windows.net/'
 RESOURCE_STORAGE = 'https://storage.azure.com/'
 RESOURCE_VAULT = 'https://vault.azure.net'
+RESOURCE_GLOBAL_MGMT = 'https://management.azure.com/'
 
 """
 Threading Variable
@@ -93,6 +86,7 @@ DEFAULT_CHUNK_SIZE = 20
 Custom Retry Code Variables
 """
 DEFAULT_MAX_RETRY_AFTER = 30
+DEFAULT_RETRY_AFTER = 5
 
 """
 KeyVault url templates
@@ -111,9 +105,18 @@ FUNCTION_HOST_CONFIG = {
         "healthCheckThreshold": 6,
         "counterThreshold": 0.80
     },
-    "functionTimeout": "00:05:00",
+    "functionTimeout": "00:10:00",
     "logging": {
-        "fileLoggingMode": "debugOnly"
+        "fileLoggingMode": "always",
+        "console": {
+            "isEnabled": "true"
+        },
+        "logLevel": {
+            "default": "Debug",
+            "Host.Results": "Trace",
+            "Function": "Trace",
+            "Host.Aggregator": "Trace"
+        }
     },
     "extensions": {
         "http": {
@@ -136,3 +139,5 @@ BLOB_TYPE = 'blob'
 QUEUE_TYPE = 'queue'
 TABLE_TYPE = 'table'
 FILE_TYPE = 'file'
+
+RESOURCE_GROUPS_TYPE = 'resourceGroups'

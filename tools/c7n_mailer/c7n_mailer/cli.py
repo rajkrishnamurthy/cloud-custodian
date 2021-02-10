@@ -1,5 +1,5 @@
-from __future__ import absolute_import, division, print_function, unicode_literals
-
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 import argparse
 import functools
 import logging
@@ -7,20 +7,46 @@ from os import path
 
 import boto3
 import jsonschema
+import yaml
 from c7n_mailer import deploy, utils
 from c7n_mailer.azure_mailer.azure_queue_processor import MailerAzureQueueProcessor
 from c7n_mailer.azure_mailer import deploy as azure_deploy
 from c7n_mailer.sqs_queue_processor import MailerSqsQueueProcessor
 from c7n_mailer.utils import get_provider, Providers
-from ruamel import yaml
+
+AZURE_KV_SECRET_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'type': {'enum': ['azure.keyvault']},
+        'secret': {'type': 'string'}
+    },
+    'required': ['type', 'secret'],
+    'additionalProperties': False
+}
+
+SECURED_STRING_SCHEMA = {
+    'oneOf': [
+        {'type': 'string'},
+        AZURE_KV_SECRET_SCHEMA
+    ]
+}
 
 CONFIG_SCHEMA = {
+    '$schema': 'http://json-schema.org/draft-07/schema',
+    'id': 'https://schema.cloudcustodian.io/v0/mailer.json',
     'type': 'object',
     'additionalProperties': False,
     'required': ['queue_url'],
     'properties': {
         'queue_url': {'type': 'string'},
+        'endpoint_url': {'type': 'string'},
         'from_address': {'type': 'string'},
+        'additional_email_headers': {
+            'type': 'object',
+            'patternProperties': {
+                '': {'type': 'string'},
+            }
+        },
         'contact_tags': {'type': 'array', 'items': {'type': 'string'}},
         'org_domain': {'type': 'string'},
 
@@ -41,6 +67,16 @@ CONFIG_SCHEMA = {
         # Azure Function Config
         'function_properties': {
             'type': 'object',
+            'identity': {
+                'type': 'object',
+                'additionalProperties': False,
+                'properties': {
+                    'type': {'enum': [
+                        "Embedded", "SystemAssigned", "UserAssigned"]},
+                    'client_id': {'type': 'string'},
+                    'id': {'type': 'string'},
+                },
+            },
             'appInsights': {
                 'type': 'object',
                 'oneOf': [
@@ -90,7 +126,7 @@ CONFIG_SCHEMA = {
         'smtp_port': {'type': 'integer'},
         'smtp_ssl': {'type': 'boolean'},
         'smtp_username': {'type': 'string'},
-        'smtp_password': {'type': 'string'},
+        'smtp_password': SECURED_STRING_SCHEMA,
         'ldap_email_key': {'type': 'string'},
         'ldap_uid_tags': {'type': 'array', 'items': {'type': 'string'}},
         'debug': {'type': 'boolean'},
@@ -111,7 +147,7 @@ CONFIG_SCHEMA = {
         'datadog_application_key': {'type': 'string'},      # TODO: encrypt with KMS?
         'slack_token': {'type': 'string'},
         'slack_webhook': {'type': 'string'},
-        'sendgrid_api_key': {'type': 'string'},
+        'sendgrid_api_key': SECURED_STRING_SCHEMA,
         'splunk_hec_url': {'type': 'string'},
         'splunk_hec_token': {'type': 'string'},
         'splunk_remove_paths': {
@@ -121,6 +157,7 @@ CONFIG_SCHEMA = {
         'splunk_actions_list': {'type': 'boolean'},
         'splunk_max_attempts': {'type': 'integer'},
         'splunk_hec_max_length': {'type': 'integer'},
+        'splunk_hec_sourcetype': {'type': 'string'},
 
         # SDK Config
         'profile': {'type': 'string'},

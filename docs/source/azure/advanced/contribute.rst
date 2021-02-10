@@ -40,6 +40,7 @@ Create your new Azure Resource.
 - ``client``: Client class name of the Azure Resource SDK of the resource you added.
 - ``enum_spec``: Is a tuple of (enum_operation, list_operation, extra_args). The resource SDK client will have a list of operations this resource has.
     Place the name of the property as the enum_operation. Next, put `list` as the operations.
+- ``default_report_fields``: Fields that are used for running ``custodian report``.
 
 .. code-block:: python
 
@@ -57,14 +58,15 @@ Create your new Azure Resource.
             default_report_fields = (
                 'name',
                 'location',
-                'resourceGroup'
+                'resourceGroup',
+                'sku.name
             )
 
 
 Load New Azure Resource
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Once the required dependecies are installed and created the new Azure Resource, custodian will
+Once the required dependencies are installed and created the new Azure Resource, custodian will
 load all registered resources. Import the resource in
 ``entry.py``.
 
@@ -139,7 +141,7 @@ For long standing operations cassette can be modified to reduce test execution t
 Running tests
 ~~~~~~~~~~~~~
 
-You can use `tox` to run all tests or instead you can use `pytest` and run only Azure tests (or only specific set of tests). Runing recorded tests still requires some authentication, it is possible to use fake data for authorization token and subscription id.
+You can use `tox` to run all tests or instead you can use `pytest` and run only Azure tests (or only specific set of tests). Running recorded tests still requires some authentication, it is possible to use fake data for authorization token and subscription id.
 
 .. code-block:: bash
 

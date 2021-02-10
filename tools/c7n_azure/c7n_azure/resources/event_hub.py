@@ -1,18 +1,5 @@
-# Copyright 2019 Microsoft Corporation
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import logging
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 
 from c7n_azure.filters import FirewallRulesFilter
 from c7n_azure.provider import resources
@@ -61,12 +48,7 @@ class EventHubFirewallRulesFilter(FirewallRulesFilter):
 
     def __init__(self, data, manager=None):
         super(EventHubFirewallRulesFilter, self).__init__(data, manager)
-        self._log = logging.getLogger('custodian.azure.eventhub')
         self.client = None
-
-    @property
-    def log(self):
-        return self._log
 
     def process(self, resources, event=None):
         self.client = self.manager.get_client()

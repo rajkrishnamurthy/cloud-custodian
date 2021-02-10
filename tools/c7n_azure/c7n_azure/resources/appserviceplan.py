@@ -1,24 +1,11 @@
-# Copyright 2018 Capital One Services, LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
 
-from c7n import utils
-
+from azure.mgmt.web import models
+from c7n.lookup import Lookup
+from c7n_azure.actions.base import AzureBaseAction
 from c7n_azure.provider import resources
 from c7n_azure.resources.arm import ArmResourceManager
-from c7n_azure.actions.base import AzureBaseAction
-from azure.mgmt.web import models
-from c7n_azure.lookup import Lookup
 
 
 @resources.register('appserviceplan')
@@ -52,9 +39,10 @@ class AppServicePlan(ArmResourceManager):
             'name',
             'location',
             'resourceGroup',
-            'kind'
+            'kind',
+            'sku.[name, tier, capacity]'
         )
-        resource_type = 'Microsoft.Web/sites'
+        resource_type = 'Microsoft.Web/serverfarms'
 
 
 @AppServicePlan.action_registry.register('resize-plan')
@@ -63,7 +51,7 @@ class ResizePlan(AzureBaseAction):
 
     :example:
 
-    Resize App Service Plan to F1 plan with 1 instance.
+    Resize App Service Plan to B1 plan with 2 instance.
 
     .. code-block:: yaml
 
@@ -72,8 +60,8 @@ class ResizePlan(AzureBaseAction):
           resource: azure.appserviceplan
           actions:
            - type: resize-plan
-             size: F1
-             count: 1
+             size: B1
+             count: 2
 
 
     :example:
@@ -93,7 +81,8 @@ class ResizePlan(AzureBaseAction):
             actions:
               - type: resize-plan
                 size:
-                    resource: tags.on_hour_sku
+                    type: resource
+                    key: tags.on_hour_sku
                     default-value: P1
 
           - name: off-hours
@@ -107,16 +96,21 @@ class ResizePlan(AzureBaseAction):
               - type: tag
                 tag: on_hour_sku
                 value:
-                    resource: sku.name
+                    type: resource
+                    key: sku.name
               - type: resize-plan
-                size:
-                    size: S1
+                size: S1
 
     """
 
-    schema = utils.type_schema(
-        'resize-plan',
-        **{
+    schema = {
+        'type': 'object',
+        'anyOf': [
+            {'required': ['size']},
+            {'required': ['count']}
+        ],
+        'properties': {
+            'type': {'enum': ['resize-plan']},
             'size': Lookup.lookup_type({'type': 'string',
                                         'enum': ['F1', 'B1', 'B2', 'B3', 'D1',
                                                  'S1', 'S2', 'S3', 'P1', 'P2',
@@ -124,8 +118,10 @@ class ResizePlan(AzureBaseAction):
                                                  'PC2', 'PC3', 'PC4']
                                         }),
             'count': Lookup.lookup_type({'type': 'integer'})
-        }
-    )
+        },
+        'additionalProperties': False
+    }
+    schema_alias = True
 
     def _prepare_processing(self):
         self.client = self.manager.get_client()  # type azure.mgmt.web.WebSiteManagementClient
@@ -141,14 +137,19 @@ class ResizePlan(AzureBaseAction):
         if resource['kind'] == 'linux':
             model.reserved = True
 
+        size = Lookup.extract(self.data.get('size'), resource)
+
+        # get existing tier
+        model.sku = models.SkuDescription()
+        model.sku.tier = resource['sku']['tier']
+        model.sku.name = resource['sku']['name']
+
         if 'size' in self.data:
-            size = Lookup.extract(self.data.get('size'), resource)
-            model.sku = models.SkuDescription()
             model.sku.tier = ResizePlan.get_sku_name(size)
             model.sku.name = size
 
         if 'count' in self.data:
-            model.target_worker_count = Lookup.extract(self.data.get('count'), resource)
+            model.sku.capacity = Lookup.extract(self.data.get('count'), resource)
 
         try:
             self.client.app_service_plans.update(resource['resourceGroup'], resource['name'], model)

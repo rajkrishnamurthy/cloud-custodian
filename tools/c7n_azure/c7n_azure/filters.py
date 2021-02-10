@@ -1,38 +1,28 @@
-# Copyright 2015-2018 Capital One Services, LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright The Cloud Custodian Authors.
+# SPDX-License-Identifier: Apache-2.0
+import logging
+import isodate
 import operator
 from abc import ABCMeta, abstractmethod
 from concurrent.futures import as_completed
 from datetime import timedelta
 
-import six
 from azure.mgmt.costmanagement.models import (QueryAggregation,
                                               QueryComparisonExpression,
                                               QueryDataset, QueryDefinition,
                                               QueryFilter, QueryGrouping,
                                               QueryTimePeriod, TimeframeType)
 from azure.mgmt.policyinsights import PolicyInsightsClient
-from dateutil import tz as tzutils
+from c7n_azure.tags import TagHelper
+from c7n_azure.utils import (IpRangeHelper, Math, ResourceIdParser,
+                             StringUtils, ThreadHelper, now, utcnow, is_resource_group)
 from dateutil.parser import parse
+from msrest.exceptions import HttpOperationError
 
 from c7n.filters import Filter, FilterValidationError, ValueFilter
 from c7n.filters.core import PolicyValidationError
 from c7n.filters.offhours import OffHour, OnHour, Time
 from c7n.utils import chunks, get_annotation_prefix, type_schema
-from c7n_azure.tags import TagHelper
-from c7n_azure.utils import (IpRangeHelper, Math, ResourceIdParser,
-                             StringUtils, ThreadHelper, now, utcnow)
 
 scalar_ops = {
     'eq': operator.eq,
@@ -120,7 +110,10 @@ class MetricFilter(Filter):
 
     aggregation_funcs = {
         'average': Math.mean,
-        'total': Math.sum
+        'total': Math.sum,
+        'count': Math.sum,
+        'minimum': Math.min,
+        'maximum': Math.max
     }
 
     schema = {
@@ -135,8 +128,8 @@ class MetricFilter(Filter):
             'timeframe': {'type': 'number'},
             'interval': {'enum': [
                 'PT1M', 'PT5M', 'PT15M', 'PT30M', 'PT1H', 'PT6H', 'PT12H', 'P1D']},
-            'aggregation': {'enum': ['total', 'average']},
-            'no_data_action': {'enum': ['include', 'exclude']},
+            'aggregation': {'enum': ['total', 'average', 'count', 'minimum', 'maximum']},
+            'no_data_action': {'enum': ['include', 'exclude', 'to_zero']},
             'filter': {'type': 'string'}
         }
     }
@@ -153,7 +146,7 @@ class MetricFilter(Filter):
         # Number of hours from current UTC time
         self.timeframe = float(self.data.get('timeframe', self.DEFAULT_TIMEFRAME))
         # Interval as defined by Azure SDK
-        self.interval = self.data.get('interval', self.DEFAULT_INTERVAL)
+        self.interval = isodate.parse_duration(self.data.get('interval', self.DEFAULT_INTERVAL))
         # Aggregation as defined by Azure SDK
         self.aggregation = self.data.get('aggregation', self.DEFAULT_AGGREGATION)
         # Aggregation function to be used locally
@@ -184,15 +177,19 @@ class MetricFilter(Filter):
         cached_metric_data = self._get_cached_metric_data(resource)
         if cached_metric_data:
             return cached_metric_data['measurement']
-
-        metrics_data = self.client.metrics.list(
-            resource['id'],
-            timespan=self.timespan,
-            interval=self.interval,
-            metricnames=self.metric,
-            aggregation=self.aggregation,
-            filter=self.filter
-        )
+        try:
+            metrics_data = self.client.metrics.list(
+                self.get_resource_id(resource),
+                timespan=self.timespan,
+                interval=self.interval,
+                metricnames=self.metric,
+                aggregation=self.aggregation,
+                filter=self.get_filter(resource)
+            )
+        except HttpOperationError:
+            self.log.exception("Could not get metric: %s on %s" % (
+                self.metric, resource['id']))
+            return None
 
         if len(metrics_data.value) > 0 and len(metrics_data.value[0].timeseries) > 0:
             m = [getattr(item, self.aggregation)
@@ -200,9 +197,21 @@ class MetricFilter(Filter):
         else:
             m = None
 
+        if self.no_data_action == "to_zero":
+            if m is None:
+                m = [0]
+            else:
+                m = [0 if v is None else v for v in m]
+
         self._write_metric_to_resource(resource, metrics_data, m)
 
         return m
+
+    def get_resource_id(self, resource):
+        return resource['id']
+
+    def get_filter(self, resource):
+        return self.filter
 
     def _write_metric_to_resource(self, resource, metrics_data, m):
         resource_metrics = resource.setdefault(get_annotation_prefix('metrics'), {})
@@ -288,6 +297,7 @@ class TagActionFilter(Filter):
         op={'type': 'string'})
     schema_alias = True
     current_date = None
+    log = logging.getLogger('custodian.azure.filters.TagActionFilter')
 
     def validate(self):
         op = self.data.get('op')
@@ -295,7 +305,7 @@ class TagActionFilter(Filter):
             raise PolicyValidationError(
                 "Invalid marked-for-op op:%s in %s" % (op, self.manager.data))
 
-        tz = tzutils.gettz(Time.TZ_ALIASES.get(self.data.get('tz', 'utc')))
+        tz = Time.get_tz(self.data.get('tz', 'utc'))
         if not tz:
             raise PolicyValidationError(
                 "Invalid timezone specified '%s' in %s" % (
@@ -303,18 +313,14 @@ class TagActionFilter(Filter):
         return self
 
     def process(self, resources, event=None):
-        from c7n_azure.utils import now
-        if self.current_date is None:
-            self.current_date = now()
         self.tag = self.data.get('tag', DEFAULT_TAG)
         self.op = self.data.get('op', 'stop')
         self.skew = self.data.get('skew', 0)
         self.skew_hours = self.data.get('skew_hours', 0)
-        self.tz = tzutils.gettz(Time.TZ_ALIASES.get(self.data.get('tz', 'utc')))
+        self.tz = Time.get_tz(self.data.get('tz', 'utc'))
         return super(TagActionFilter, self).process(resources, event)
 
     def __call__(self, i):
-
         v = i.get('tags', {}).get(self.tag, None)
 
         if v is None:
@@ -331,15 +337,18 @@ class TagActionFilter(Filter):
         try:
             action_date = parse(action_date_str)
         except Exception:
-            self.log.warning("could not parse tag:%s value:%s on %s" % (
+            self.log.error("could not parse tag:%s value:%s on %s" % (
                 self.tag, v, i['InstanceId']))
+            return False
 
+        # current_date must match timezones with the parsed date string
         if action_date.tzinfo:
-            # if action_date is timezone aware, set to timezone provided
             action_date = action_date.astimezone(self.tz)
-            self.current_date = now(tz=self.tz)
+            current_date = now(tz=self.tz)
+        else:
+            current_date = now()
 
-        return self.current_date >= (
+        return current_date >= (
             action_date - timedelta(days=self.skew, hours=self.skew_hours))
 
 
@@ -356,7 +365,7 @@ class DiagnosticSettingsFilter(ValueFilter):
 
     .. code-block:: yaml
 
-        policies
+        policies:
           - name: find-load-balancers-with-logs-enabled
             resource: azure.loadbalancer
             filters:
@@ -377,7 +386,7 @@ class DiagnosticSettingsFilter(ValueFilter):
 
     .. code-block:: yaml
 
-        policies
+        policies:
           - name: find-keyvaults-with-logs-enabled
             resource: azure.keyvault
             filters:
@@ -390,6 +399,7 @@ class DiagnosticSettingsFilter(ValueFilter):
 
     schema = type_schema('diagnostic-settings', rinherit=ValueFilter.schema)
     schema_alias = True
+    log = logging.getLogger('custodian.azure.filters.DiagnosticSettingsFilter')
 
     def process(self, resources, event=None):
         futures = []
@@ -416,7 +426,9 @@ class DiagnosticSettingsFilter(ValueFilter):
         for resource in resources:
             settings = client.diagnostic_settings.list(resource['id'])
             settings = [s.as_dict() for s in settings.value]
-
+            # put an empty item in when no diag settings, so the absent operator can function
+            if not settings:
+                settings = [{}]
             filtered_settings = super(DiagnosticSettingsFilter, self).process(settings, event=None)
 
             if filtered_settings:
@@ -510,8 +522,7 @@ class AzureOnHour(OnHour):
         return tag_value
 
 
-@six.add_metaclass(ABCMeta)
-class FirewallRulesFilter(Filter):
+class FirewallRulesFilter(Filter, metaclass=ABCMeta):
     """Filters resources by the firewall rules
 
     Rules can be specified as x.x.x.x-y.y.y.y or x.x.x.x or x.x.x.x/y.
@@ -520,10 +531,17 @@ class FirewallRulesFilter(Filter):
     specific notation.
 
     **include**: True if all IP space listed is included in firewall.
+
     **any**: True if any overlap in IP space exists.
+
     **only**: True if firewall IP space only includes IPs from provided space
     (firewall is subset of provided space).
+
     **equal**: the list of IP ranges or CIDR that firewall rules must match exactly.
+
+    **IMPORTANT**: this filter ignores all bypass rules. If you want to ensure your resource is
+    not available for other Azure Cloud services or from the Portal, please use ``firewall-bypass``
+    filter.
 
     :example:
 
@@ -558,6 +576,7 @@ class FirewallRulesFilter(Filter):
     }
 
     schema_alias = True
+    log = logging.getLogger('custodian.azure.filters.FirewallRulesFilter')
 
     def __init__(self, data, manager=None):
         super(FirewallRulesFilter, self).__init__(data, manager)
@@ -565,17 +584,15 @@ class FirewallRulesFilter(Filter):
         self.policy_equal = None
         self.policy_any = None
         self.policy_only = None
-
-    @property
-    @abstractmethod
-    def log(self):
-        raise NotImplementedError()
+        self.client = None
 
     def process(self, resources, event=None):
         self.policy_include = IpRangeHelper.parse_ip_ranges(self.data, 'include')
         self.policy_equal = IpRangeHelper.parse_ip_ranges(self.data, 'equal')
         self.policy_any = IpRangeHelper.parse_ip_ranges(self.data, 'any')
         self.policy_only = IpRangeHelper.parse_ip_ranges(self.data, 'only')
+
+        self.client = self.manager.get_client()
 
         result, _ = ThreadHelper.execute_in_parallel(
             resources=resources,
@@ -616,6 +633,74 @@ class FirewallRulesFilter(Filter):
 
         elif self.policy_only is not None:
             return resource_rules.issubset(self.policy_only)
+        else:  # validated earlier, can never happen
+            raise FilterValidationError("Internal error.")
+
+
+class FirewallBypassFilter(Filter, metaclass=ABCMeta):
+    """Filters resources by the firewall bypass rules
+    """
+
+    @staticmethod
+    def schema(values):
+        return type_schema(
+            'firewall-bypass',
+            required=['mode', 'list'],
+            **{
+                'mode': {'enum': ['include', 'equal', 'any', 'only']},
+                'list': {'type': 'array', 'items': {'enum': values}}
+            })
+
+    log = logging.getLogger('custodian.azure.filters.FirewallRulesFilter')
+
+    def __init__(self, data, manager=None):
+        super(FirewallBypassFilter, self).__init__(data, manager)
+        self.mode = self.data['mode']
+        self.list = set(self.data['list'])
+        self.client = None
+
+    def process(self, resources, event=None):
+        self.client = self.manager.get_client()
+
+        result, _ = ThreadHelper.execute_in_parallel(
+            resources=resources,
+            event=event,
+            execution_method=self._check_resources,
+            executor_factory=self.executor_factory,
+            log=self.log
+        )
+
+        return result
+
+    def _check_resources(self, resources, event):
+        return [r for r in resources if self._check_resource(r)]
+
+    @abstractmethod
+    def _query_bypass(self, resource):
+        """
+        Queries firewall rules for a resource. Override in concrete classes.
+        :param resource:
+        :return: A set of netaddr.IPSet with rules defined for the resource.
+        """
+        raise NotImplementedError()
+
+    def _check_resource(self, resource):
+        bypass_set = set(self._query_bypass(resource))
+        ok = self._check_bypass(bypass_set)
+        return ok
+
+    def _check_bypass(self, bypass_set):
+        if self.mode == 'equal':
+            return self.list == bypass_set
+
+        elif self.mode == 'include':
+            return self.list.issubset(bypass_set)
+
+        elif self.mode == 'any':
+            return not self.list.isdisjoint(bypass_set)
+
+        elif self.mode == 'only':
+            return bypass_set.issubset(self.list)
         else:  # validated earlier, can never happen
             raise FilterValidationError("Internal error.")
 
@@ -674,6 +759,7 @@ class ResourceLockFilter(Filter):
         })
 
     schema_alias = True
+    log = logging.getLogger('custodian.azure.filters.ResourceLockFilter')
 
     def __init__(self, data, manager=None):
         super(ResourceLockFilter, self).__init__(data, manager)
@@ -695,7 +781,7 @@ class ResourceLockFilter(Filter):
         client = self.manager.get_client('azure.mgmt.resource.locks.ManagementLockClient')
         result = []
         for resource in resources:
-            if resource.get('resourceGroup') is None:
+            if is_resource_group(resource):
                 locks = [r.serialize(True) for r in
                          client.management_locks.list_at_resource_group_level(
                     resource['name'])]
@@ -727,15 +813,21 @@ class CostFilter(ValueFilter):
     separately (e.g. SQL Server and SQL Server Databases). Warning message is logged if we detect
     different currencies.
 
-    Timeframe can be either number of days before today or one of:
+    Timeframe options:
 
-    WeekToDate,
-    MonthToDate,
-    YearToDate,
-    TheLastWeek,
-    TheLastMonth,
-    TheLastYear
+      - Number of days before today
 
+      - All days in current calendar period until today:
+
+        - ``WeekToDate``
+        - ``MonthToDate``
+        - ``YearToDate``
+
+      - All days in the previous calendar period:
+
+        - ``TheLastWeek``
+        - ``TheLastMonth``
+        - ``TheLastYear``
 
     :examples:
 
@@ -782,6 +874,7 @@ class CostFilter(ValueFilter):
         })
 
     schema_alias = True
+    log = logging.getLogger('custodian.azure.filters.CostFilter')
 
     def __init__(self, data, manager=None):
         data['key'] = 'PreTaxCost'  # can also be Currency, but now only PreTaxCost is supported
@@ -897,7 +990,7 @@ class ParentFilter(Filter):
 
         policies:
           - name: kv-keys-from-tagged-keyvaults
-            resource: azure.keyvault-keys
+            resource: azure.keyvault-key
             filters:
               - type: parent
                 filter:
